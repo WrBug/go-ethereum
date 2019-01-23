@@ -58,8 +58,6 @@ type Network struct {
 	Conns   []*Conn `json:"conns"`
 	connMap map[string]int
 
-	pivotNodeID enode.ID
-
 	nodeAdapter adapters.NodeAdapter
 	events      event.Feed
 	lock        sync.RWMutex
@@ -170,24 +168,28 @@ func (net *Network) Start(id enode.ID) error {
 // snapshots
 func (net *Network) startWithSnapshots(id enode.ID, snapshots map[string][]byte) error {
 	net.lock.Lock()
-	defer net.lock.Unlock()
 
 	node := net.getNode(id)
 	if node == nil {
+		net.lock.Unlock()
 		return fmt.Errorf("node %v does not exist", id)
 	}
 	if node.Up {
+		net.lock.Unlock()
 		return fmt.Errorf("node %v already up", id)
 	}
 	log.Trace("Starting node", "id", id, "adapter", net.nodeAdapter.Name())
 	if err := node.Start(snapshots); err != nil {
+		net.lock.Unlock()
 		log.Warn("Node startup failed", "id", id, "err", err)
 		return err
 	}
 	node.Up = true
 	log.Info("Started node", "id", id)
+	ev := NewEvent(node)
+	net.lock.Unlock()
 
-	net.events.Send(NewEvent(node))
+	net.events.Send(ev)
 
 	// subscribe to peer events
 	client, err := node.Client()
@@ -212,12 +214,14 @@ func (net *Network) watchPeerEvents(id enode.ID, events chan *p2p.PeerEvent, sub
 		// assume the node is now down
 		net.lock.Lock()
 		defer net.lock.Unlock()
+
 		node := net.getNode(id)
 		if node == nil {
 			return
 		}
 		node.Up = false
-		net.events.Send(NewEvent(node))
+		ev := NewEvent(node)
+		net.events.Send(ev)
 	}()
 	for {
 		select {
@@ -256,9 +260,11 @@ func (net *Network) Stop(id enode.ID) error {
 	net.lock.Lock()
 	node := net.getNode(id)
 	if node == nil {
+		net.lock.Unlock()
 		return fmt.Errorf("node %v does not exist", id)
 	}
 	if !node.Up {
+		net.lock.Unlock()
 		return fmt.Errorf("node %v already down", id)
 	}
 	node.Up = false
@@ -272,7 +278,10 @@ func (net *Network) Stop(id enode.ID) error {
 		return err
 	}
 	log.Info("Stopped node", "id", id, "err", err)
-	net.events.Send(ControlEvent(node))
+	net.lock.Lock()
+	ev := ControlEvent(node)
+	net.lock.Unlock()
+	net.events.Send(ev)
 	return nil
 }
 
@@ -518,7 +527,7 @@ func (net *Network) getConn(oneID, otherID enode.ID) *Conn {
 	return net.Conns[i]
 }
 
-// InitConn(one, other) retrieves the connectiton model for the connection between
+// InitConn(one, other) retrieves the connection model for the connection between
 // peers one and other, or creates a new one if it does not exist
 // the order of nodes does not matter, i.e., Conn(i,j) == Conn(j, i)
 // it checks if the connection is already up, and if the nodes are running
@@ -564,8 +573,8 @@ func (net *Network) Shutdown() {
 	close(net.quitc)
 }
 
-//Reset resets all network properties:
-//emtpies the nodes and the connection list
+// Reset resets all network properties:
+// empties the nodes and the connection list
 func (net *Network) Reset() {
 	net.lock.Lock()
 	defer net.lock.Unlock()
